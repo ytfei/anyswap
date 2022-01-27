@@ -327,6 +327,9 @@ def tokenToEthTransferOutput(eth_bought: uint256(wei), max_tokens: uint256, dead
 
 @private
 def tokenToTokenInput(tokens_sold: uint256, min_tokens_bought: uint256, min_eth_bought: uint256(wei), deadline: timestamp, buyer: address, recipient: address, exchange_addr: address) -> uint256:
+    # token 与 token 之间的互换，还是以 ETH 为锚定价格的，逻辑上是 token => ETH => token
+    # 如果分别操作，会有买入 ETH 和 卖出 ETH两次交易，但是这里，ETH 在同一个账户里面，没有发生真实的交易操作，从而完成了 Token <=> Token 的转换，
+    # 降低了交易手续费
     assert (deadline >= block.timestamp and tokens_sold > 0) and (min_tokens_bought > 0 and min_eth_bought > 0)
     assert exchange_addr != self and exchange_addr != ZERO_ADDRESS
     tokens_fee: uint256 = (tokens_sold * 2 + 999) / 1000
