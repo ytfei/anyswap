@@ -32,8 +32,8 @@ issuer: public(address)
 @public
 def setup(token_addr: address):
     assert (self.factory == ZERO_ADDRESS and self.token == ZERO_ADDRESS) and token_addr != ZERO_ADDRESS
-    self.factory = msg.sender
-    self.token = token_addr
+    self.factory = msg.sender # 调用这个方法的，是 uniswap_factory 合约
+    self.token = token_addr # 我们新增的可兑换代币
     self.name = 0x416e797377617000000000000000000000000000000000000000000000000000
     self.symbol = 0x5357415000000000000000000000000000000000000000000000000000000000
     self.decimals = 18
@@ -49,29 +49,51 @@ def setup(token_addr: address):
 @payable
 def addLiquidity(min_liquidity: uint256, max_tokens: uint256, deadline: timestamp) -> uint256:
     assert deadline > block.timestamp and (max_tokens > 0 and msg.value > 0)
-    total_liquidity: uint256 = self.totalSupply
+    total_liquidity: uint256 = self.totalSupply # self 指的是 Exchange 的地址，即交易合约的地址。
+
     if total_liquidity > 0:
         assert min_liquidity > 0
+
+        # 交易所当前持有的 ETH 与 Token
         eth_reserve: uint256(wei) = self.balance - msg.value
         token_reserve: uint256 = self.token.balanceOf(self)
+
+        # 放入的 ETH 乘以 token 与 ETH 的汇率（当前比率），就是本次新用户需要放入 代币总量
         token_amount: uint256 = msg.value * token_reserve / eth_reserve + 1
+
+        # 计算需要新铸造的交易所代币？
+        # 第二次放入时 total_liquidity / eth_reserve 还是等于 1 呀？
+        # 不对，因为 ETH 余额是一直发生变化的，不断会有用户兑换，所以 eth_reserve 是变化的，所以这个公式可以鼓励用户将交易对维持在平衡状态：
+        # 即：如果 ETH 少了，放入 ETH 可以产生更多的交易所代币，如果ETH多了，放入 ETH 就产生较少的代币。
         liquidity_minted: uint256 = msg.value * total_liquidity / eth_reserve
+
         assert max_tokens >= token_amount and liquidity_minted >= min_liquidity
+
         self.balances[msg.sender] += liquidity_minted
         self.totalSupply = total_liquidity + liquidity_minted
+
         assert self.token.transferFrom(msg.sender, self, token_amount)
         log.AddLiquidity(msg.sender, msg.value, token_amount)
         log.Transfer(ZERO_ADDRESS, msg.sender, liquidity_minted)
+
         return liquidity_minted
     else:
+        # 确保已经初始化了，并且消息最少一个 gwei
         assert (self.factory != ZERO_ADDRESS and self.token != ZERO_ADDRESS) and msg.value >= 1000000000
         assert self.factory.getExchange(self.token) == self
+
+        # 加入的代币数量
         token_amount: uint256 = max_tokens
-        initial_liquidity: uint256 = as_unitless_number(self.balance)
+
+        # Exchange 会发型自己的代币，通过放入 Token-ETH 交易对，Exchange会铸造新的代币。代币的余额一开始就设定好了？
+        # 不对，self.balance 是 Exchange 当前持有的 ETH 余额数量。如果你有 1ETH，然后你放入 1000000000自己的代币A，就形成了初始的流动性。
+        # msg.value 是调用合约时，转过来的ETH数量吗？调用者同时放入 ETH和token的
+        initial_liquidity: uint256 = as_unitless_number(self.balance) # 第一次调用的时候，balance 就是 msg.value ?
         self.totalSupply = initial_liquidity
-        self.balances[msg.sender] = initial_liquidity
+        self.balances[msg.sender] = initial_liquidity # 记账，将用户发过来的ETH单独记录【错了，这里不是ETH，是交易所代币余额】
+
         assert self.token.transferFrom(msg.sender, self, token_amount)
-        log.AddLiquidity(msg.sender, msg.value, token_amount)
+        log.AddLiquidity(msg.sender, msg.value, token_amount) # 用户放入的ETH和token数量
         log.Transfer(ZERO_ADDRESS, msg.sender, initial_liquidity)
         return initial_liquidity
 
@@ -86,16 +108,22 @@ def removeLiquidity(amount: uint256, min_eth: uint256(wei), min_tokens: uint256,
     assert (amount > 0 and deadline > block.timestamp) and (min_eth > 0 and min_tokens > 0)
     total_liquidity: uint256 = self.totalSupply
     assert total_liquidity > 0
+
+    # X / total_liquidity 这个比例计算的合适吗？
     token_reserve: uint256 = self.token.balanceOf(self)
     eth_amount: uint256(wei) = amount * self.balance / total_liquidity
     token_amount: uint256 = amount * token_reserve / total_liquidity
     assert eth_amount >= min_eth and token_amount >= min_tokens
+
     self.balances[msg.sender] -= amount
     self.totalSupply = total_liquidity - amount
+
     send(msg.sender, eth_amount)
     assert self.token.transfer(msg.sender, token_amount)
+
     log.RemoveLiquidity(msg.sender, eth_amount, token_amount)
-    log.Transfer(msg.sender, ZERO_ADDRESS, amount)
+    log.Transfer(msg.sender, ZERO_ADDRESS, amount) # 用户销毁流动性
+
     return eth_amount, token_amount
 
 # @dev Pricing function for converting between ETH and Tokens.
@@ -107,9 +135,15 @@ def removeLiquidity(amount: uint256, min_eth: uint256(wei), min_tokens: uint256,
 @constant
 def getInputPrice(input_amount: uint256, input_reserve: uint256, output_reserve: uint256) -> uint256:
     assert input_reserve > 0 and output_reserve > 0
+
+    # 这是扣留在池子里面的，给流动性提供方的收益吗？
+    # 997 ? 加了手续费吗？ 0.3%
     input_amount_with_fee: uint256 = input_amount * 997
+
+    # 看不懂，大意是：放入 10个 ETH 可以兑换处多少个 代币，反之亦然
     numerator: uint256 = input_amount_with_fee * output_reserve
     denominator: uint256 = (input_reserve * 1000) + input_amount_with_fee
+
     return numerator / denominator
 
 # @dev Pricing function for converting between ETH and Tokens.
@@ -125,15 +159,21 @@ def getOutputPrice(output_amount: uint256, input_reserve: uint256, output_reserv
     denominator: uint256 = (output_reserve - output_amount) * 997
     return numerator / denominator + 1
 
+# 基于转入的 ETH 实时兑换成 Token，token是计算出来的，ETH 是固定挂单价
 @private
 def ethToTokenInput(eth_sold: uint256(wei), min_tokens: uint256, deadline: timestamp, buyer: address, recipient: address) -> uint256:
     assert deadline >= block.timestamp and (eth_sold > 0 and min_tokens > 0)
+
+    #TODO: eth_sold == 1 时， eth_sold2 不就是负数了吗？
     eth_fee: uint256(wei) = (eth_sold * 2 + 999) / 1000
     eth_sold2: uint256(wei) = eth_sold - eth_fee
+
     token_reserve: uint256 = self.token.balanceOf(self)
     tokens_bought: uint256 = self.getInputPrice(as_unitless_number(eth_sold2), as_unitless_number(self.balance - eth_sold2), token_reserve)
+
     assert tokens_bought >= min_tokens
-    send(self.issuer, eth_fee)
+    send(self.issuer, eth_fee) # 手续费，平台方的手续费
+
     assert self.token.transfer(recipient, tokens_bought)
     log.TokenPurchase(buyer, eth_sold, tokens_bought)
     return tokens_bought
@@ -168,17 +208,21 @@ def ethToTokenTransferInput(min_tokens: uint256, deadline: timestamp, recipient:
     assert recipient != self and recipient != ZERO_ADDRESS
     return self.ethToTokenInput(msg.value, min_tokens, deadline, msg.sender, recipient)
 
+# 基于要买入的 token 计算 ETH 的数量，用户指定买入 token 的数量，根据市场价格，计算应该支付的 ETH
 @private
 def ethToTokenOutput(tokens_bought: uint256, max_eth: uint256(wei), deadline: timestamp, buyer: address, recipient: address) -> uint256(wei):
     assert deadline >= block.timestamp and (tokens_bought > 0 and max_eth > 0)
+
     token_reserve: uint256 = self.token.balanceOf(self)
     eth_sold: uint256 = self.getOutputPrice(tokens_bought, as_unitless_number(self.balance - max_eth), token_reserve)
     eth_fee: uint256 = (eth_sold * 2 + 999) / 1000
     eth_sold2: uint256(wei) = as_wei_value(eth_sold + eth_fee, 'wei')
+
     # Throws if eth_sold > max_eth
     eth_refund: uint256(wei) = max_eth - eth_sold2
     if eth_refund > 0:
-        send(buyer, eth_refund)
+        send(buyer, eth_refund) # 将多余的费用退回去
+
     send(self.issuer, as_wei_value(eth_fee, 'wei'))
     assert self.token.transfer(recipient, tokens_bought)
     log.TokenPurchase(buyer, eth_sold2, tokens_bought)
@@ -288,11 +332,14 @@ def tokenToTokenInput(tokens_sold: uint256, min_tokens_bought: uint256, min_eth_
     tokens_fee: uint256 = (tokens_sold * 2 + 999) / 1000
     tokens_sold2: uint256 = tokens_sold - tokens_fee
     token_reserve: uint256 = self.token.balanceOf(self)
+
     eth_bought: uint256 = self.getInputPrice(tokens_sold2, token_reserve, as_unitless_number(self.balance))
     wei_bought: uint256(wei) = as_wei_value(eth_bought, 'wei')
+
     assert wei_bought >= min_eth_bought
     assert self.token.transferFrom(buyer, self.issuer, tokens_fee)
     assert self.token.transferFrom(buyer, self, tokens_sold2)
+
     tokens_bought: uint256 = Exchange(exchange_addr).ethToTokenTransferInput(min_tokens_bought, deadline, recipient, value=wei_bought)
     log.EthPurchase(buyer, tokens_sold, wei_bought)
     return tokens_bought
@@ -307,6 +354,7 @@ def tokenToTokenInput(tokens_sold: uint256, min_tokens_bought: uint256, min_eth_
 # @return Amount of Tokens (token_addr) bought.
 @public
 def tokenToTokenSwapInput(tokens_sold: uint256, min_tokens_bought: uint256, min_eth_bought: uint256(wei), deadline: timestamp, token_addr: address) -> uint256:
+    # 两种不同 token 之间互相转换
     exchange_addr: address = self.factory.getExchange(token_addr)
     return self.tokenToTokenInput(tokens_sold, min_tokens_bought, min_eth_bought, deadline, msg.sender, msg.sender, exchange_addr)
 
